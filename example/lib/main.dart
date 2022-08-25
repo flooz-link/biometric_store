@@ -15,7 +15,15 @@ void main() {
   PrintAppender().attachToLogger(Logger.root);
   logMessages.attachToLogger(Logger.root);
   _logger.fine('Application launched. (v2)');
+  _setTargetPlatformForDesktop();
   runApp(MyApp());
+}
+
+/// If the current platform is desktop, override the default platform to
+/// a supported platform (iOS for macOS, Android for Linux and Windows).
+/// Otherwise, do nothing.
+void _setTargetPlatformForDesktop() {
+  // no longer required.
 }
 
 class StringBufferWrapper with ChangeNotifier {
@@ -133,7 +141,7 @@ class MyAppState extends State<MyApp> {
                   _customPrompt = await BiometricStorage().getStorage(
                       '${baseName}_customPrompt',
                       options: StorageFileInitOptions(
-                          authenticationValidityDurationSeconds: 5),
+                          authenticationValidityDurationSeconds: 10),
                       promptInfo: const PromptInfo(
                         iosPromptInfo: IosPromptInfo(
                           saveTitle: 'Custom save title',
@@ -175,7 +183,7 @@ class MyAppState extends State<MyApp> {
             ...?(_customPrompt == null
                 ? null
                 : [
-                    const Text('Custom Prompts w/ 5s auth validity',
+                    const Text('Custom Prompts w/ 10s auth validity',
                         style: TextStyle(fontWeight: FontWeight.bold)),
                     StorageActions(
                         storageFile: _customPrompt!,
