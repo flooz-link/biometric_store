@@ -41,12 +41,19 @@ class BiometricStorageImpl {
     self.storageMethodNotImplemented = storageMethodNotImplemented
   }
   
-  private var stores: [String: BiometricStorageFile] = [:]
+  private lazy var context: LAContext = LAContext()
+  private var stores: [String: InitOptions] = [:]
   private let storageError: StorageError
   private let storageMethodNotImplemented: Any
 
   private func storageError(code: String, message: String?, details: Any?) -> Any {
     return storageError(code, message, details)
+  }
+
+  private func baseQuery(name: String) -> [String: Any] {
+    return [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "flutter_biometric_storage",
+            kSecAttrAccount as String: name]
   }
 
   public func handle(_ call: StorageMethodCall, result: @escaping StorageCallback) {
@@ -67,20 +74,13 @@ class BiometricStorageImpl {
       cb(valueTyped)
       return
     }
-    func requireStorage(_ name: String, _ cb: (BiometricStorageFile) -> Void) {
-      guard let file = stores[name] else {
-        result(storageError(code: "InvalidArguments", message: "Storage was not initialized \(name)", details: nil))
-        return
-      }
-      cb(file)
-    }
     
     if ("canAuthenticate" == call.method) {
       canAuthenticate(result: result)
     } else if ("init" == call.method) {
       requiredArg("name") { name in
         requiredArg("options") { options in
-          stores[name] = BiometricStorageFile(name: name, initOptions: InitOptions(params: options), storageError: storageError)
+          stores[name] = InitOptions(params: options)
         }
       }
       result(true)
@@ -90,27 +90,21 @@ class BiometricStorageImpl {
     } else if ("read" == call.method) {
       requiredArg("name") { name in
         requiredArg("iosPromptInfo") { promptInfo in
-          requireStorage(name) { file in
-            file.read(result, IOSPromptInfo(params: promptInfo))
-          }
+          read(name, result, IOSPromptInfo(params: promptInfo))
         }
       }
     } else if ("write" == call.method) {
       requiredArg("name") { name in
         requiredArg("content") { content in
           requiredArg("iosPromptInfo") { promptInfo in
-            requireStorage(name) { file in
-              file.write(content, result, IOSPromptInfo(params: promptInfo))
-            }
+            write(name, content, result, IOSPromptInfo(params: promptInfo))
           }
         }
       }
     } else if ("delete" == call.method) {
       requiredArg("name") { name in
         requiredArg("iosPromptInfo") { promptInfo in
-          requireStorage(name) { file in
-            file.delete(result, IOSPromptInfo(params: promptInfo))
-          }
+          delete(name, result, IOSPromptInfo(params: promptInfo))
         }
       }
     } else {
@@ -118,111 +112,9 @@ class BiometricStorageImpl {
     }
   }
   
-
-  private func canAuthenticate(result: @escaping StorageCallback) {
-    var error: NSError?
-    let context = LAContext()
-    if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) {
-      result("Success")
-      return
-    }
-    guard let err = error else {
-      result("ErrorUnknown")
-      return
-    }
-    let laError = LAError(_nsError: err)
-    NSLog("LAError: \(laError)");
-    switch laError.code {
-    case .touchIDNotAvailable:
-      result("ErrorHwUnavailable")
-      break;
-    case .passcodeNotSet: fallthrough
-    case .touchIDNotEnrolled:
-      result("ErrorNoBiometricEnrolled")
-      break;
-    case .invalidContext: fallthrough
-    default:
-      result("ErrorUnknown")
-      break;
-    }
-  }
-}
-
-class BiometricStorageFile {
-  private let name: String
-  private let initOptions: InitOptions
-  private var context: LAContext { get {
-    let context = LAContext()
-    if (initOptions.authenticationRequired) {
-      if initOptions.authenticationValidityDurationSeconds > 0 {
-        if #available(OSX 10.12, *) {
-          context.touchIDAuthenticationAllowableReuseDuration = Double(initOptions.authenticationValidityDurationSeconds)
-        } else {
-          // Fallback on earlier versions
-          hpdebug("Pre OSX 10.12 no touchIDAuthenticationAllowableReuseDuration available. ignoring.")
-        }
-      }
-    }
-    return context
-  } }
-  private let storageError: StorageError
-
-  init(name: String, initOptions: InitOptions, storageError: @escaping StorageError) {
-    self.name = name
-    self.initOptions = initOptions
-    self.storageError = storageError
-  }
-  
-  private func baseQuery(_ result: @escaping StorageCallback) -> [String: Any]? {
-    var query = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: "flutter_biometric_storage",
-      kSecAttrAccount as String: name,
-    ] as [String : Any]
-    if initOptions.authenticationRequired {
-      guard let access = accessControl(result) else {
-        return nil
-      }
-      if #available(iOS 13.0, *) {
-        query[kSecUseDataProtectionKeychain as String] = true
-      }
-      query[kSecAttrAccessControl as String] = access
-    }
-    return query
-  }
-  
-  private func accessControl(_ result: @escaping StorageCallback) -> SecAccessControl? {
-    let accessControlFlags: SecAccessControlCreateFlags
+  private func read(_ name: String, _ result: @escaping StorageCallback, _ promptInfo: IOSPromptInfo) {
     
-    if #available(iOS 11.3, *) {
-      accessControlFlags =  .biometryCurrentSet
-    } else {
-      accessControlFlags = .touchIDCurrentSet
-    }
-        
-//      access = SecAccessControlCreateWithFlags(nil,
-//                                               kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-//                                               accessControlFlags,
-//                                               &error)
-    var error: Unmanaged<CFError>?
-    guard let access = SecAccessControlCreateWithFlags(
-      nil, // Use the default allocator.
-      kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
-      accessControlFlags,
-      &error) else {
-      hpdebug("Error while creating access control flags. \(String(describing: error))")
-      result(storageError("writing data", "error writing data", "\(String(describing: error))"));
-      return nil
-    }
-
-    return access
-  }
-  
-  func read(_ result: @escaping StorageCallback, _ promptInfo: IOSPromptInfo) {
-
-    guard var query = baseQuery(result) else {
-      return;
-    }
+    var query = baseQuery(name: name)
     query[kSecMatchLimit as String] = kSecMatchLimitOne
     query[kSecUseOperationPrompt as String] = promptInfo.accessTitle
     query[kSecReturnAttributes as String] = true
@@ -244,16 +136,14 @@ class BiometricStorageFile {
       let data = existingItem[kSecValueData as String] as? Data,
       let dataString = String(data: data, encoding: String.Encoding.utf8)
       else {
-        result(storageError("RetrieveError", "Unexpected data.", nil))
+        result(storageError(code: "RetrieveError", message: "Unexpected data.", details: nil))
         return
     }
     result(dataString)
   }
   
-  func delete(_ result: @escaping StorageCallback, _ promptInfo: IOSPromptInfo) {
-    guard let query = baseQuery(result) else {
-      return;
-    }
+  private func delete(_ name: String, _ result: @escaping StorageCallback, _ promptInfo: IOSPromptInfo) {
+    let query = baseQuery(name: name)
     //    query[kSecMatchLimit as String] = kSecMatchLimitOne
     //    query[kSecReturnData as String] = true
     let status = SecItemDelete(query as CFDictionary)
@@ -269,14 +159,36 @@ class BiometricStorageFile {
     handleOSStatusError(status, result, "writing data")
   }
   
-  func write(_ content: String, _ result: @escaping StorageCallback, _ promptInfo: IOSPromptInfo) {
-    guard var query = baseQuery(result) else {
-      return;
+  private func write(_ name: String, _ content: String, _ result: @escaping StorageCallback, _ promptInfo: IOSPromptInfo) {
+    guard let initOptions = stores[name] else {
+      result(storageError(code: "WriteError", message: "Storage was not initialized. \(name)", details: nil))
+      return
     }
-
+    
+    var query = baseQuery(name: name)
+    
     if (initOptions.authenticationRequired) {
+      if initOptions.authenticationValidityDurationSeconds > 0 {
+        if #available(OSX 10.12, *) {
+          context.touchIDAuthenticationAllowableReuseDuration = Double(initOptions.authenticationValidityDurationSeconds)
+        } else {
+          // Fallback on earlier versions
+          hpdebug("Pre OSX 10.12 no touchIDAuthenticationAllowableReuseDuration available. ignoring.")
+        }
+      }
+      var error: Unmanaged<CFError>?
+      guard let access = SecAccessControlCreateWithFlags(
+        nil, // Use the default allocator.
+        kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+        .userPresence,
+        &error) else {
+        hpdebug("Error while creating access control flags. \(String(describing: error))")
+        result(storageError(code:"writing data", message:"error writing data", details:"\(String(describing: error))"));
+        return;
+      }
       query.merge([
         kSecUseAuthenticationContext as String: context,
+        kSecAttrAccessControl as String: access as Any,
       ]) { (_, new) in new }
       if let operationPrompt = promptInfo.saveTitle {
         query[kSecUseOperationPrompt as String] = operationPrompt
@@ -315,7 +227,36 @@ class BiometricStorageFile {
       code = "SecurityError"
     }
     
-    result(storageError(code, "Error while \(message): \(status): \(errorMessage ?? "Unknown")", nil))
+    result(storageError(code: code, message: "Error while \(message): \(status): \(errorMessage ?? "Unknown")", details: nil))
   }
   
+  private func canAuthenticate(result: @escaping StorageCallback) {
+    if #available(iOS 10.0, OSX 10.12, *) {
+      context.localizedCancelTitle = "Checking auth support"
+    }
+    var error: NSError?
+    if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) {
+      result("Success")
+      return
+    }
+    guard let err = error else {
+      result("ErrorUnknown")
+      return
+    }
+    let laError = LAError(_nsError: err)
+    NSLog("LAError: \(laError)");
+    switch laError.code {
+    case .touchIDNotAvailable:
+      result("ErrorHwUnavailable")
+      break;
+    case .passcodeNotSet: fallthrough
+    case .touchIDNotEnrolled:
+      result("ErrorNoBiometricEnrolled")
+      break;
+    case .invalidContext: fallthrough
+    default:
+      result("ErrorUnknown")
+      break;
+    }
+  }
 }
